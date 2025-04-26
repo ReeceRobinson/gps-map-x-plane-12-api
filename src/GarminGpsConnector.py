@@ -3,6 +3,10 @@ import io
 import logging
 import os
 import socket
+import asyncio
+from GarminGpsWebAPI import GarminGpsWebAPI
+import json
+import websockets
 
 import sys
 import time
@@ -34,18 +38,18 @@ class GarminGpsConnector:
     logger.info('Starting GarminGpsConnector')
 
     def __init__(self):
-        self.config = GarminGpsConnector.load_config(self)
+        self.config = GarminGpsConnector.load_config()
         logging.debug('Configuration loaded: {0}'.format(str(self.config.values())))
 
-        device = self.config['x-plane']['connection']['serial']['device']
-        device_ok = os.path.exists(device)
+        self.device = self.config['x-plane']['connection']['serial']['device']
+        device_ok = os.path.exists(self.device)
         if not device_ok:
             self.logger.error(
-                'Invalid device setting for x-plane/connection/serial/device. Value is currently {0}'.format(device))
-            sys.exit(-1)
+                'Invalid device setting for x-plane/connection/serial/device. Value is currently {0}'.format(self.device))
+            raise FileNotFoundError(f'Device not found: {self.device}')
 
     @staticmethod
-    def load_config(self):
+    def load_config():
         config = {}
         with open(r'resources/config.yml') as file:
             # The FullLoader parameter handles the conversion from YAML
@@ -54,7 +58,7 @@ class GarminGpsConnector:
         return config
 
     @staticmethod
-    def parse_message(self, msg):
+    def parse_message(msg):
         parts = msg.split('\r\n')
         result = {'altitude': parts[0][2:]}
         latitude_parts = parts[1].split(' ')
@@ -73,7 +77,7 @@ class GarminGpsConnector:
         geo_code = parts[9][1:]
         result['geo_code'] = geo_code
         return result
-
+    
     def monitor(self):
         """
         Monitor the serial messages emit-ed by X-Plane when GPS AviationIn is enabled.
@@ -172,6 +176,7 @@ class GarminGpsConnector:
 
         return "{0}".format(hemi), "{0:02n}".format(deg), "{0:04n}".format(round(minutes * 100))
 
+
     def run_gps(self) -> None:
         """
         Run the GPS connector.
@@ -246,22 +251,95 @@ class GarminGpsConnector:
             sio.close()
             ser.close()
 
+    def run_webapi(self):
+        """
+        Run the GPS connector using the Web API.
+        """
+        gps_webapi = GarminGpsWebAPI(self.config)
 
-@click.command()
-@click.option('--mode',
-              type=click.Choice(['GPS', 'monitor', 'webapi'], case_sensitive=False))
-def main(mode):
-    client = GarminGpsConnector()
+        async def main():
+            await gps_webapi.fetch_dataref_ids()
+            await gps_webapi.connect_websocket()
 
-    if str(mode).lower() == 'monitor':
-        client.monitor()
-    elif str(mode).lower() == 'webapi':
-        client.run_webapi()
-    else:
-        client.run_gps()
+            # Open serial connection
+            ser = serial.Serial(
+                self.config['x-plane']['connection']['serial']['device'],
+                self.config['x-plane']['connection']['serial']['baud'],
+                timeout=self.config['x-plane']['connection']['serial']['timeout']
+            )
+            sio = io.TextIOWrapper(io.BufferedWriter(ser), write_through=True, line_buffering=False, errors=None)
+            self.logger.info('GPS serial connection initialized.')
 
-    logging.info('Exit.')
+            try:
+                async for message in gps_webapi.websocket:
+                    data = json.loads(message)
+                    if data.get("type") == "dataref_update_values":
+                        values = data.get("data", {})
 
+                        # Extract values using dataref IDs
+                        latitude = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/latitude"]))
+                        longitude = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/longitude"]))
+                        elevation = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/elevation"]))
+                        mag_psi = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/mag_psi"]))
+                        magnetic_variation = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/magnetic_variation"]))
+                        airspeed_kts_pilot = values.get(str(gps_webapi.dataref_ids["sim/cockpit2/gauges/indicators/airspeed_kts_pilot"]))
+
+                        # Convert and format values as needed
+                        altitude = "{0:05n}".format(int(float(elevation) * 3.28084))
+                        latitude_formatted = self.convert_lat(latitude)
+                        longitude_formatted = self.convert_lon(longitude)
+                        compass = int(round(mag_psi))
+                        mag_var = int(round(float(magnetic_variation) * 10))
+                        mag_prefix = "W" if mag_var >= 0 else "E"
+                        knots = int(round(airspeed_kts_pilot))
+
+                        # Construct the message
+                        message_template = 'z{0}\x0D\x0AA{1} {2} {3}\x0D\x0AB{4} {5} {6}\x0D\x0AC{7:03n}\x0D\x0AD{8:03n}\x0D\x0AE00000\x0D\x0AGR0000\x0D\x0AI0000\x0D\x0AKL0000\x0D\x0AQ{9}\x0D\x0AS-----\x0D\x0AT---------\r\nw01@\x0D\x0A'
+                        msg = message_template.format(
+                            altitude,
+                            *latitude_formatted,
+                            *longitude_formatted,
+                            compass,
+                            knots,
+                            "{0}{1:03n}".format(mag_prefix, abs(mag_var))
+                        )
+
+                        # Send the message to the GPS device
+                        sio.write(msg)
+                        sio.flush()
+                        self.logger.debug('\n' + msg)
+
+            except websockets.exceptions.ConnectionClosed:
+                self.logger.warning("WebSocket connection closed.")
+            finally:
+                sio.close()
+                ser.close()
+
+        asyncio.run(main())
+
+@click.group()
+@click.pass_context
+def cli(ctx):
+    """Garmin GPS Connector CLI."""
+    ctx.obj = GarminGpsConnector()
+
+@cli.command()
+@click.pass_obj
+def monitor(connector):
+    """Monitor the serial messages emitted by X-Plane."""
+    connector.monitor()
+
+@cli.command()
+@click.pass_obj
+def run_gps(connector):
+    """Run the GPS connector."""
+    connector.run_gps()
+
+@cli.command()
+@click.pass_obj
+def run_webapi(connector):
+    """Run the GPS connector using the Web API."""
+    connector.run_webapi()
 
 if __name__ == "__main__":
-    main()
+    cli()

@@ -1,7 +1,7 @@
 x-plane:
   connection:
     serial:
-      device: /dev/tty.usbserial-144420
+      device: /dev/tty.debug-console #tty.usbserial-144420
       baud: 9600
       timeout: 5
     network:

@@ -1,0 +1,47 @@
+2025-04-26 23:35:20,205 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:40:09,044 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:40:09,046 : ERROR : GarminGpsConnector : Invalid device setting for x-plane/connection/serial/device. Value is currently /dev/tty.usbserial-144420
+2025-04-26 23:41:45,974 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:41:45,975 : ERROR : GarminGpsConnector : Invalid device setting for x-plane/connection/serial/device. Value is currently /dev/tty.usbserial-144420
+2025-04-26 23:48:21,229 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:48:41,882 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:48:41,884 : ERROR : GarminGpsConnector : Invalid device setting for x-plane/connection/serial/device. Value is currently /dev/tty.usbserial-144420
+2025-04-26 23:48:41,884 : INFO : GarminGpsConnector : Connecting to X-Plane...
+2025-04-26 23:48:55,265 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:49:29,449 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:50:49,592 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:51:00,028 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:51:00,030 : ERROR : GarminGpsConnector : Invalid device setting for x-plane/connection/serial/device. Value is currently /dev/tty.usbserial-144420
+2025-04-26 23:51:00,030 : INFO : GarminGpsConnector : Connecting to X-Plane...
+2025-04-26 23:51:07,852 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:51:19,270 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:52:07,820 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:52:07,822 : ERROR : GarminGpsConnector : Invalid device setting for x-plane/connection/serial/device. Value is currently /dev/tty.usbserial-144420
+2025-04-26 23:52:07,822 : ERROR : GarminGpsConnector : Exception occurred. For details see log file. Error message: [Errno 2] could not open port /dev/tty.usbserial-144420: [Errno 2] No such file or directory: '/dev/tty.usbserial-144420'
+2025-04-26 23:52:07,822 : ERROR : GarminGpsConnector : <traceback object at 0x104b2ae00>
+2025-04-26 23:52:14,621 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:52:14,623 : ERROR : GarminGpsConnector : Invalid device setting for x-plane/connection/serial/device. Value is currently /dev/tty.usbserial-144420
+2025-04-26 23:53:24,758 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:53:24,759 : ERROR : GarminGpsConnector : Invalid device setting for x-plane/connection/serial/device. Value is currently /dev/tty.usbserial-144420
+2025-04-26 23:53:28,082 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:53:28,083 : ERROR : GarminGpsConnector : Invalid device setting for x-plane/connection/serial/device. Value is currently /dev/tty.usbserial-144420
+2025-04-26 23:55:36,702 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:55:40,230 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:57:52,037 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:58:34,209 : INFO : GarminGpsConnector : Starting GarminGpsConnector
+2025-04-26 23:58:34,324 : INFO : GarminGpsConnector : GPS serial connection initialized.
+2025-04-26 23:58:34,408 : DEBUG : GarminGpsConnector : 
+z02971
+AN 48 0121
+BE 12 3324
+C307
+D107
+E00000
+GR0000
+I0000
+KL0000
+QE044
+S-----
+T---------
+w01@
+

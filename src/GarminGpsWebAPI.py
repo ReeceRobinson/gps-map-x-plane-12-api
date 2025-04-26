@@ -114,7 +114,7 @@ class GarminGpsWebAPI:
                         time_passed = (now - last_time) > self.log_interval
 
                         if value_changed and time_passed:
-                            logger.info(f"{name}: {value:.6f}")
+                            self.handle_dataref_update(name, value)
                             self.last_dataref_values[dataref_id] = value
                             self.last_dataref_times[dataref_id] = now
 
@@ -127,6 +127,13 @@ class GarminGpsWebAPI:
                     logger.debug(f"Unknown message type: {message_type}")
         except websockets.exceptions.ConnectionClosed:
             logger.warning("WebSocket connection closed.")
+
+    def handle_dataref_update(self, name: str, value: float):
+        """
+        Handle updated dataref values.
+        For now, just log them. Later, you can send to serial, file, etc.
+        """
+        logger.info(f"Update -> {name}: {value:.6f}")
 
     async def run(self):
         await self.fetch_dataref_ids()
