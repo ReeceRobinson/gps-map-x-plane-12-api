@@ -1,0 +1,15 @@
+x-plane:
+  connection:
+    serial:
+      device: /dev/tty.usbserial-144420
+      baud: 9600
+      timeout: 5
+    network:
+      host: localhost
+      xpport: 49009
+      port: 0
+      timeout: 2000
+    webapi:
+      url: http://localhost:8086/api/v2
+  output:
+    filename: output.csv
