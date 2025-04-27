@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import sys
 import time
 import aiohttp
 import websockets
@@ -9,7 +8,7 @@ import yaml
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("GarminGpsWebAPI")
+logger = logging.getLogger(__name__)
 
 # Load configuration
 def load_config():
@@ -36,7 +35,6 @@ class GarminGpsWebAPI:
         self.id_to_name = {}  # maps dataref ID to its name
         self.last_dataref_values = {}
         self.last_dataref_times = {}
-        self.log_interval = 2.0  # seconds
         self.value_threshold = 0.001
         self.last_processed_time = 0
         self.processing_interval = 1  # seconds (equivalent to 1Hz)
@@ -110,21 +108,16 @@ class GarminGpsWebAPI:
                 if message_type == "dataref_update_values":
                     values = data.get("data", {})
 
-                    now = time.time()
                     for dataref_id_str, value in values.items():
                         dataref_id = int(dataref_id_str)
                         name = self.id_to_name.get(dataref_id, f"Unknown ID {dataref_id}")
 
                         last_value = self.last_dataref_values.get(dataref_id)
-                        # last_time = self.last_dataref_times.get(dataref_id, 0)
-
                         value_changed = last_value is None or abs(value - last_value) > self.value_threshold
-                        # time_passed = (now - last_time) > self.log_interval
 
                         if value_changed: #and time_passed:
                             self.handle_dataref_update(name, value)
                             self.last_dataref_values[dataref_id] = value
-                            self.last_dataref_times[dataref_id] = now
 
                 elif message_type == "dataref_values":
                     params = data.get("params", {})
@@ -149,6 +142,7 @@ class GarminGpsWebAPI:
         await self.receive_data()
 
 if __name__ == "__main__":
+
     config = load_config()
     gps_webapi = GarminGpsWebAPI(config)
     asyncio.run(gps_webapi.run())
