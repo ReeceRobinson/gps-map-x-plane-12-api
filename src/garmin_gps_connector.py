@@ -9,6 +9,7 @@ import json
 import websockets
 
 import sys
+import math
 import time
 
 import click
@@ -16,6 +17,9 @@ import serial
 import yaml
 
 import xpc
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("GarminGpsConnector")
 
 class MockSerial(io.RawIOBase):
     def __init__(self, *args, **kwargs):
@@ -44,7 +48,7 @@ class MockSerial(io.RawIOBase):
             self.logger.debug(f"MockSerial write: {decoded_data}")
             return len(data)
         else:
-            self.logger.debug(f"MockSerial write: {data}")
+            self.logger.info(f"MockSerial write: {data}")
             return len(data)
 
     def flush(self):
@@ -60,8 +64,6 @@ class GarminGpsConnector:
     """
     Garmin GPS Hardware connector for X-Plane and AviationIn format capture.pp
     """
-    logger = logging.Logger("GarminGpsConnector", logging.DEBUG)
-
     file_handler = logging.FileHandler('garmin_gps_connector.log')
     formatter = logging.Formatter('%(asctime)s : %(levelname)s : %(name)s : %(message)s')
     file_handler.setFormatter(formatter)
@@ -297,11 +299,14 @@ class GarminGpsConnector:
         Run the GPS connector using the Web API.
         """
         gps_webapi = GarminGpsWebAPI(self.config)
+        message_rate = self.config['x-plane']['connection']['webapi'].get('message_rate', 10)
+        # Initialize a dictionary to store the last known good values
+        last_known_values = {}
 
         async def main():
             await gps_webapi.fetch_dataref_ids()
             await gps_webapi.connect_websocket()
-
+            message_counter = 0
             # Open serial connection
             if test_mode:
                 ser = MockSerial()
@@ -311,28 +316,54 @@ class GarminGpsConnector:
                     self.config['x-plane']['connection']['serial']['baud'],
                     timeout=self.config['x-plane']['connection']['serial']['timeout'])
             sio = io.TextIOWrapper(io.BufferedWriter(ser), write_through=True, line_buffering=False, errors=None)
-            self.logger.info('GPS serial connection initialized.')
+            logger.info('GPS serial connection initialized.')
 
             try:
                 async for message in gps_webapi.websocket:
                     data = json.loads(message)
                     if data.get("type") == "dataref_update_values":
+                        message_counter += 1
+                        if message_counter % message_rate != 0:
+                            continue  # Skip processing this message
+
                         values = data.get("data", {})
 
                         # Extract values using dataref IDs
-                        latitude = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/latitude"]))
-                        longitude = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/longitude"]))
-                        elevation = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/elevation"]))
-                        mag_psi = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/mag_psi"]))
-                        magnetic_variation = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/magnetic_variation"]))
-                        airspeed_kts_pilot = values.get(str(gps_webapi.dataref_ids["sim/cockpit2/gauges/indicators/airspeed_kts_pilot"]))
-                        # Check for None values
-                        if None in (latitude, longitude, elevation, mag_psi, magnetic_variation, airspeed_kts_pilot):
-                            self.logger.warning("Received incomplete data from simulator: "
-                                                f"latitude={latitude}, longitude={longitude}, elevation={elevation}, "
-                                                f"mag_psi={mag_psi}, magnetic_variation={magnetic_variation}, "
-                                                f"airspeed_kts_pilot={airspeed_kts_pilot}")
-                            continue  # Skip this iteration if any data is missing
+                        data_fields = {
+                            'latitude': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/latitude"])),
+                            'longitude': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/longitude"])),
+                            'elevation': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/elevation"])),
+                            'mag_psi': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/mag_psi"])),
+                            'magnetic_variation': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/magnetic_variation"])),
+                            'airspeed_kts_pilot': values.get(str(gps_webapi.dataref_ids["sim/cockpit2/gauges/indicators/airspeed_kts_pilot"]),0),
+                            'paused': values.get(str(gps_webapi.dataref_ids["sim/time/paused"]))
+                        }
+                        # paused = int(data_fields.get('paused', 0)) if data_fields.get('paused') is not None else 1
+                        # if paused:
+                        #     logger.debug("Simulator is paused; skipping GPS update.")
+                        #     continue
+
+                        # Update last known values with new data if available
+                        for key, value in data_fields.items():
+                            if value is not None:
+                                last_known_values[key] = value
+
+                        # Check if all required fields are present
+                        if not all(key in last_known_values for key in data_fields):
+                            missing_keys = [key for key in data_fields if key not in last_known_values]
+                            if missing_keys == ['airspeed_kts_pilot']:
+                                last_known_values['airspeed_kts_pilot'] = 0
+                            # else:
+                            #     logger.warning(f"Missing data for keys: {missing_keys}; skipping message.")
+                            #     continue
+
+                        # Retrieve the latest data for processing
+                        latitude = last_known_values['latitude']
+                        longitude = last_known_values['longitude']
+                        elevation = last_known_values['elevation']
+                        mag_psi = last_known_values['mag_psi']
+                        magnetic_variation = last_known_values['magnetic_variation']
+                        airspeed_kts_pilot = last_known_values['airspeed_kts_pilot']
                         # Convert and format values as needed
                         altitude = "{0:05n}".format(int(float(elevation) * 3.28084))
                         latitude_formatted = self.convert_lat(latitude)
@@ -340,7 +371,7 @@ class GarminGpsConnector:
                         compass = int(round(mag_psi))
                         mag_var = int(round(float(magnetic_variation) * 10))
                         mag_prefix = "W" if mag_var >= 0 else "E"
-                        knots = int(round(airspeed_kts_pilot))
+                        knots = int(round(airspeed_kts_pilot)) if airspeed_kts_pilot is not None and not math.isnan(airspeed_kts_pilot) else 0
 
                         # Construct the message
                         message_template = 'z{0}\x0D\x0AA{1} {2} {3}\x0D\x0AB{4} {5} {6}\x0D\x0AC{7:03n}\x0D\x0AD{8:03n}\x0D\x0AE00000\x0D\x0AGR0000\x0D\x0AI0000\x0D\x0AKL0000\x0D\x0AQ{9}\x0D\x0AS-----\x0D\x0AT---------\r\nw01@\x0D\x0A'
@@ -356,11 +387,12 @@ class GarminGpsConnector:
                         # Send the message to the GPS device
                         sio.write(msg)
                         sio.flush()
-                        self.logger.debug('\n' + msg)
+                        logger.debug('\n' + msg)
 
             except websockets.exceptions.ConnectionClosed:
-                self.logger.warning("WebSocket connection closed.")
+                logger.warning("WebSocket connection closed.")
             finally:
+                time.sleep(1)
                 sio.close()
                 ser.close()
 

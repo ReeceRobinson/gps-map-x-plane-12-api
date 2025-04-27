@@ -23,7 +23,8 @@ DATAREF_NAMES = [
     "sim/flightmodel/position/elevation",
     "sim/flightmodel/position/mag_psi",
     "sim/flightmodel/position/magnetic_variation",
-    "sim/cockpit2/gauges/indicators/airspeed_kts_pilot"
+    "sim/cockpit2/gauges/indicators/airspeed_kts_pilot",
+    "sim/time/paused"
 ]
 
 class GarminGpsWebAPI:
@@ -31,12 +32,14 @@ class GarminGpsWebAPI:
         self.config = config
         self.dataref_ids = {}
         self.websocket = None
-        self.next_req_id = 11
+        self.next_req_id = 1
         self.id_to_name = {}  # maps dataref ID to its name
         self.last_dataref_values = {}
         self.last_dataref_times = {}
         self.log_interval = 2.0  # seconds
         self.value_threshold = 0.001
+        self.last_processed_time = 0
+        self.processing_interval = 1  # seconds (equivalent to 1Hz)
 
     async def fetch_dataref_ids(self):
         """
@@ -96,6 +99,11 @@ class GarminGpsWebAPI:
         """
         try:
             async for message in self.websocket:
+                current_time = time.time()
+                if current_time - self.last_processed_time < self.processing_interval:
+                    continue  # Skip processing to throttle the rate
+                self.last_processed_time = current_time
+            
                 data = json.loads(message)
                 message_type = data.get("type")
 
@@ -108,12 +116,12 @@ class GarminGpsWebAPI:
                         name = self.id_to_name.get(dataref_id, f"Unknown ID {dataref_id}")
 
                         last_value = self.last_dataref_values.get(dataref_id)
-                        last_time = self.last_dataref_times.get(dataref_id, 0)
+                        # last_time = self.last_dataref_times.get(dataref_id, 0)
 
                         value_changed = last_value is None or abs(value - last_value) > self.value_threshold
-                        time_passed = (now - last_time) > self.log_interval
+                        # time_passed = (now - last_time) > self.log_interval
 
-                        if value_changed and time_passed:
+                        if value_changed: #and time_passed:
                             self.handle_dataref_update(name, value)
                             self.last_dataref_values[dataref_id] = value
                             self.last_dataref_times[dataref_id] = now
