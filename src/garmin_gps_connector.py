@@ -116,6 +116,49 @@ class GarminGpsConnector:
 
         return "{0}".format(hemi), "{0:02d}".format(deg), "{0:04d}".format(round(minutes * 100))
 
+
+    # ------------------------------------------------------------------ #
+    # Helper: build one Aviation-In sentence                              #
+    # ------------------------------------------------------------------ #
+    def build_sentence(self, latitude, longitude, elevation_m,
+                       mag_psi, magnetic_variation_deg, knots):
+        """Return a formatted Aviation-In ASCII sentence."""
+        altitude_ft = int(elevation_m * 3.28084)
+        lat_h, lat_deg, lat_min = self.convert_lat(latitude)
+        lon_h, lon_deg, lon_min = self.convert_lon(longitude)
+        compass = int(round(mag_psi))
+        mag_var_tenths = int(round(magnetic_variation_deg * 10))
+        mag_prefix = "W" if mag_var_tenths >= 0 else "E"
+
+        sentence = (
+            "z{alt:05d}\r\n"
+            "A{lat_h} {lat_deg} {lat_min}\r\n"
+            "B{lon_h} {lon_deg} {lon_min}\r\n"
+            "C{comp:03d}\r\n"
+            "D{spd:03d}\r\n"
+            "E00000\r\n"
+            "GR0000\r\n"
+            "I0000\r\n"
+            "KL0000\r\n"
+            "Q{mag_pref}{mag:03d}\r\n"
+            "S-----\r\n"
+            "T---------\r\n"
+            "w01@\r\n"
+        ).format(
+            alt=altitude_ft,
+            lat_h=lat_h, lat_deg=lat_deg, lat_min=lat_min,
+            lon_h=lon_h, lon_deg=lon_deg, lon_min=lon_min,
+            comp=compass, spd=knots,
+            mag_pref=mag_prefix, mag=abs(mag_var_tenths)
+        )
+
+        # Log the outgoing sentence (control chars replaced for readability)
+        logger.debug(
+            "SENT-GPS ▶ %s",
+            sentence.replace(chr(2), "<STX>").replace(chr(3), "<ETX>").strip()
+        )
+        return sentence
+    
     def run_webapi(self, test_mode=False):
         """
         Run the GPS connector using the Web API.
@@ -174,34 +217,10 @@ class GarminGpsConnector:
                         mag_psi   = last_known_values.get('mag_psi', 0.0)
                         magnetic_variation = last_known_values.get('magnetic_variation', 0.0)
 
-                        altitude = f"{int(elevation * 3.28084):05d}"
-                        lat_h, lat_deg, lat_min = self.convert_lat(latitude)
-                        lon_h, lon_deg, lon_min = self.convert_lon(longitude)
-                        compass = int(round(mag_psi))
-                        mag_var = int(round(magnetic_variation * 10))
-                        mag_prefix = "W" if mag_var >= 0 else "E"
-
-                        frozen_msg = (
-                            "z{alt}\r\n"
-                            "A{lat_h} {lat_deg} {lat_min}\r\n"
-                            "B{lon_h} {lon_deg} {lon_min}\r\n"
-                            "C{comp:03d}\r\n"
-                            "D000\r\n"
-                            "E00000\r\n"
-                            "GR0000\r\n"
-                            "I0000\r\n"
-                            "KL0000\r\n"
-                            "Q{mag_pref}{mag:03d}\r\n"
-                            "S-----\r\n"
-                            "T---------\r\n"
-                            "w01@\r\n"
-                        ).format(
-                            alt=altitude,
-                            lat_h=lat_h, lat_deg=lat_deg, lat_min=lat_min,
-                            lon_h=lon_h, lon_deg=lon_deg, lon_min=lon_min,
-                            comp=compass,
-                            mag_pref=mag_prefix,
-                            mag=abs(mag_var)
+                        frozen_msg = self.build_sentence(
+                            latitude, longitude, elevation,
+                            mag_psi, magnetic_variation,
+                            0   # knots frozen at 0
                         )
                         sio.write(frozen_msg)
                         sio.flush()
@@ -265,33 +284,16 @@ class GarminGpsConnector:
                         magnetic_variation = last_known_values['magnetic_variation']
                         airspeed_kts_pilot = last_known_values['airspeed_kts_pilot']
 
-                        # Convert and format values as needed
-                        altitude = "{0:05n}".format(int(float(elevation) * 3.28084))
-                        latitude_formatted = self.convert_lat(latitude)
-                        longitude_formatted = self.convert_lon(longitude)
-                        compass = int(round(mag_psi))
-                        mag_var = int(round(float(magnetic_variation) * 10))
-                        # X-Plane:  +E  / –W    |
-                        # Garmin Q: W=+ / E=–   |  therefore invert the sign ↓
-                        mag_prefix = "W" if mag_var >= 0 else "E"
-                        # Set airspeed: 0 while paused, otherwise use the live value
+                        # Build Aviation‑In sentence
                         if paused:
                             knots = 0
                         else:
                             knots = int(round(airspeed_kts_pilot)) if airspeed_kts_pilot is not None and not math.isnan(airspeed_kts_pilot) else 0
-
-                        # Construct the message
-                        message_template = 'z{0}\x0D\x0AA{1} {2} {3}\x0D\x0AB{4} {5} {6}\x0D\x0AC{7:03d}\x0D\x0AD{8:03d}\x0D\x0AE00000\x0D\x0AGR0000\x0D\x0AI0000\x0D\x0AKL0000\x0D\x0AQ{9}\x0D\x0AS-----\x0D\x0AT---------\r\nw01@\x0D\x0A'
-                        msg = message_template.format(
-                            altitude,
-                            *latitude_formatted,
-                            *longitude_formatted,
-                            compass,
-                            knots,
-                            "{0}{1:03n}".format(mag_prefix, abs(mag_var))
+                        msg = self.build_sentence(
+                            latitude, longitude, elevation,
+                            mag_psi, magnetic_variation,
+                            knots
                         )
-
-                        # Send the message to the GPS device
                         sio.write(msg)
                         sio.flush()
                         logger.debug('\n' + msg)
@@ -336,40 +338,15 @@ class GarminGpsConnector:
                                     mag_psi   = last_known_values.get('mag_psi', 0.0)
                                     magnetic_variation = last_known_values.get('magnetic_variation', 0.0)
                                     airspeed_kts_pilot = last_known_values.get('airspeed_kts_pilot', 0.0)
-
-                                    altitude = f"{int(elevation * 3.28084):05d}"
-                                    lat_h, lat_deg, lat_min = self.convert_lat(latitude)
-                                    lon_h, lon_deg, lon_min = self.convert_lon(longitude)
-                                    compass = int(round(mag_psi))
-                                    mag_var = int(round(magnetic_variation * 10))
-                                    mag_prefix = "W" if mag_var >= 0 else "E"
                                     knots = 0 if new_paused == 1 else int(round(airspeed_kts_pilot))
-
-                                    msg = (
-                                        "z{alt}\r\n"
-                                        "A{lat_h}{lat_deg} {lat_min}\r\n"
-                                        "B{lon_h}{lon_deg} {lon_min}\r\n"
-                                        "C{comp:03d}\r\n"
-                                        "D{spd:03d}\r\n"
-                                        "E00000\r\n"
-                                        "GR0000\r\n"
-                                        "I0000\r\n"
-                                        "KL0000\r\n"
-                                        "Q{mag_pref}{mag:03d}\r\n"
-                                        "S-----\r\n"
-                                        "T---------\r\n"
-                                        "w01@\r\n"
-                                    ).format(
-                                        alt=altitude,
-                                        lat_h=lat_h, lat_deg=lat_deg, lat_min=lat_min,
-                                        lon_h=lon_h, lon_deg=lon_deg, lon_min=lon_min,
-                                        comp=compass,
-                                        spd=knots,
-                                        mag_pref=mag_prefix,
-                                        mag=abs(mag_var)
+                                    msg = self.build_sentence(
+                                        latitude, longitude, elevation,
+                                        mag_psi, magnetic_variation,
+                                        knots
                                     )
                                     sio.write(msg)
                                     sio.flush()
+                                    logger.debug('\n' + msg)
 
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("WebSocket connection closed.")

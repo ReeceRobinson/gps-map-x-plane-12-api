@@ -136,6 +136,47 @@ class GarminGpsWebAPI:
         """
         logger.info(f"Update -> {name}: {value:.6f}")
 
+    # ------------------------------------------------------------------ #
+    # Helper: build one Aviation‑In sentence                              #
+    # ------------------------------------------------------------------ #
+    def build_sentence(self, latitude, longitude, elevation_m,
+                       mag_psi, magnetic_variation_deg, knots):
+        """
+        Format a complete Aviation‑In ASCII sentence.
+        """
+        altitude_ft = int(elevation_m * 3.28084)
+
+        lat_h, lat_deg, lat_min = self.convert_lat(latitude)
+        lon_h, lon_deg, lon_min = self.convert_lon(longitude)
+
+        compass = int(round(mag_psi))
+        mag_var_tenths = int(round(magnetic_variation_deg * 10))
+        mag_prefix = "W" if mag_var_tenths >= 0 else "E"
+
+        return (
+            "z{alt:05d}\r\n"
+            "A{lat_h} {lat_deg} {lat_min}\r\n"
+            "B{lon_h} {lon_deg} {lon_min}\r\n"
+            "C{comp:03d}\r\n"
+            "D{spd:03d}\r\n"
+            "E00000\r\n"
+            "GR0000\r\n"
+            "I0000\r\n"
+            "KL0000\r\n"
+            "Q{mag_pref}{mag:03d}\r\n"
+            "S-----\r\n"
+            "T---------\r\n"
+            "w01@\r\n"
+        ).format(
+            alt=altitude_ft,
+            lat_h=lat_h, lat_deg=lat_deg, lat_min=lat_min,
+            lon_h=lon_h, lon_deg=lon_deg, lon_min=lon_min,
+            comp=compass,
+            spd=knots,
+            mag_pref=mag_prefix,
+            mag=abs(mag_var_tenths)
+        )
+
     async def run(self):
         await self.fetch_dataref_ids()
         await self.connect_websocket()
