@@ -4,7 +4,7 @@ import logging
 import os
 import socket
 import asyncio
-from GarminGpsWebAPI import GarminGpsWebAPI
+from garmin_gps_webapi import GarminGpsWebAPI
 import json
 import websockets
 
@@ -17,6 +17,44 @@ import yaml
 
 import xpc
 
+class MockSerial(io.RawIOBase):
+    def __init__(self, *args, **kwargs):
+        self.logger = logging.getLogger('MockSerial')
+        self.logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(handler)
+        self.logger.debug("Initialized MockSerial")
+
+class MockSerial(io.RawIOBase):
+    def __init__(self, *args, **kwargs):
+        self.logger = logging.getLogger('MockSerial')
+        self.logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(handler)
+        self.logger.debug("Initialized MockSerial")
+
+    def write(self, data):
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            try:
+                decoded_data = data.tobytes().decode('utf-8', errors='replace')
+            except AttributeError:
+                decoded_data = data.decode('utf-8', errors='replace')
+            self.logger.debug(f"MockSerial write: {decoded_data}")
+            return len(data)
+        else:
+            self.logger.debug(f"MockSerial write: {data}")
+            return len(data)
+
+    def flush(self):
+        self.logger.debug("MockSerial flush called")
+
+    def close(self):
+        self.logger.debug("MockSerial closed")
+
+    def writable(self):
+        return True
 
 class GarminGpsConnector:
     """
@@ -177,7 +215,7 @@ class GarminGpsConnector:
         return "{0}".format(hemi), "{0:02n}".format(deg), "{0:04n}".format(round(minutes * 100))
 
 
-    def run_gps(self) -> None:
+    def run_gps(self, test_mode=False) -> None:
         """
         Run the GPS connector.
         The serial cable is connected between the X-Plane simulation machine and the physical Garmin GPS.
@@ -187,10 +225,13 @@ class GarminGpsConnector:
         """
         message_template = 'z{0}\x0D\x0AA{1} {2} {3}\x0D\x0AB{4} {5} {6}\x0D\x0AC{7:03n}\x0D\x0AD{8:03n}\x0D\x0AE00000\x0D\x0AGR0000\x0D\x0AI0000\x0D\x0AKL0000\x0D\x0AQ{9}\x0D\x0AS-----\x0D\x0AT---------\r\nw01@\x0D\x0A'
         try:
-            ser = serial.Serial(
-                self.config['x-plane']['connection']['serial']['device'],
-                self.config['x-plane']['connection']['serial']['baud'],
-                timeout=self.config['x-plane']['connection']['serial']['timeout'])
+            if test_mode:
+                ser = MockSerial()
+            else:
+                ser = serial.Serial(
+                    self.config['x-plane']['connection']['serial']['device'],
+                    self.config['x-plane']['connection']['serial']['baud'],
+                    timeout=self.config['x-plane']['connection']['serial']['timeout'])
 
             sio = io.TextIOWrapper(io.BufferedWriter(ser), write_through=True, line_buffering=False, errors=None)
             self.logger.info('GPS serial connection initialised.')
@@ -251,7 +292,7 @@ class GarminGpsConnector:
             sio.close()
             ser.close()
 
-    def run_webapi(self):
+    def run_webapi(self, test_mode=False):
         """
         Run the GPS connector using the Web API.
         """
@@ -262,11 +303,13 @@ class GarminGpsConnector:
             await gps_webapi.connect_websocket()
 
             # Open serial connection
-            ser = serial.Serial(
-                self.config['x-plane']['connection']['serial']['device'],
-                self.config['x-plane']['connection']['serial']['baud'],
-                timeout=self.config['x-plane']['connection']['serial']['timeout']
-            )
+            if test_mode:
+                ser = MockSerial()
+            else:
+                ser = serial.Serial(
+                    self.config['x-plane']['connection']['serial']['device'],
+                    self.config['x-plane']['connection']['serial']['baud'],
+                    timeout=self.config['x-plane']['connection']['serial']['timeout'])
             sio = io.TextIOWrapper(io.BufferedWriter(ser), write_through=True, line_buffering=False, errors=None)
             self.logger.info('GPS serial connection initialized.')
 
@@ -283,7 +326,13 @@ class GarminGpsConnector:
                         mag_psi = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/mag_psi"]))
                         magnetic_variation = values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/magnetic_variation"]))
                         airspeed_kts_pilot = values.get(str(gps_webapi.dataref_ids["sim/cockpit2/gauges/indicators/airspeed_kts_pilot"]))
-
+                        # Check for None values
+                        if None in (latitude, longitude, elevation, mag_psi, magnetic_variation, airspeed_kts_pilot):
+                            self.logger.warning("Received incomplete data from simulator: "
+                                                f"latitude={latitude}, longitude={longitude}, elevation={elevation}, "
+                                                f"mag_psi={mag_psi}, magnetic_variation={magnetic_variation}, "
+                                                f"airspeed_kts_pilot={airspeed_kts_pilot}")
+                            continue  # Skip this iteration if any data is missing
                         # Convert and format values as needed
                         altitude = "{0:05n}".format(int(float(elevation) * 3.28084))
                         latitude_formatted = self.convert_lat(latitude)
@@ -321,25 +370,30 @@ class GarminGpsConnector:
 @click.pass_context
 def cli(ctx):
     """Garmin GPS Connector CLI."""
-    ctx.obj = GarminGpsConnector()
+    pass
 
 @cli.command()
 @click.pass_obj
 def monitor(connector):
     """Monitor the serial messages emitted by X-Plane."""
+    connector = GarminGpsConnector()
     connector.monitor()
 
 @cli.command()
+@click.option('--test', is_flag=True, help='Enable test mode with mocked serial port.')
 @click.pass_obj
-def run_gps(connector):
+def run_gps(connector, test):
     """Run the GPS connector."""
-    connector.run_gps()
+    connector = GarminGpsConnector()
+    connector.run_gps(test_mode=test)
 
 @cli.command()
+@click.option('--test', is_flag=True, help='Enable test mode with mocked serial port.')
 @click.pass_obj
-def run_webapi(connector):
+def run_webapi(connector, test):
     """Run the GPS connector using the Web API."""
-    connector.run_webapi()
+    connector = GarminGpsConnector()
+    connector.run_webapi(test_mode=test)
 
 if __name__ == "__main__":
     cli()

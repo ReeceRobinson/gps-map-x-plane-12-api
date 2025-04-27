@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch, AsyncMock
 import yaml
-from GarminGpsWebAPI import GarminGpsWebAPI
+from garmin_gps_webapi import GarminGpsWebAPI
 
 class TestGarminGpsWebAPI(unittest.IsolatedAsyncioTestCase):
     def setUp(self):

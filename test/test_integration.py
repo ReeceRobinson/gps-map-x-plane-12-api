@@ -1,6 +1,6 @@
 import asyncio
 import yaml
-from GarminGpsWebAPI import GarminGpsWebAPI
+from garmin_gps_webapi import GarminGpsWebAPI
 
 async def main():
     # Load configuration
