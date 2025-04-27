@@ -334,28 +334,35 @@ class GarminGpsConnector:
                             'longitude': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/longitude"])),
                             'elevation': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/elevation"])),
                             'mag_psi': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/mag_psi"])),
-                            'magnetic_variation': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/magnetic_variation"])),
+                            'magnetic_variation': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/magnetic_variation"]), 0.0),
                             'airspeed_kts_pilot': values.get(str(gps_webapi.dataref_ids["sim/cockpit2/gauges/indicators/airspeed_kts_pilot"]),0),
-                            'paused': values.get(str(gps_webapi.dataref_ids["sim/time/paused"]))
+                            'paused': values.get(str(gps_webapi.dataref_ids["sim/time/paused"]),0)
                         }
-                        # paused = int(data_fields.get('paused', 0)) if data_fields.get('paused') is not None else 1
-                        # if paused:
-                        #     logger.debug("Simulator is paused; skipping GPS update.")
-                        #     continue
+                        paused = int(data_fields.get('paused', 0)) if data_fields.get('paused') is not None else 1
+                        if paused:
+                            logger.info("Simulator is paused; Freezing GPS position.")
+                            knots = 0  # force airspeed to 0
 
                         # Update last known values with new data if available
                         for key, value in data_fields.items():
                             if value is not None:
                                 last_known_values[key] = value
 
-                        # Check if all required fields are present
-                        if not all(key in last_known_values for key in data_fields):
-                            missing_keys = [key for key in data_fields if key not in last_known_values]
-                            if missing_keys == ['airspeed_kts_pilot']:
-                                last_known_values['airspeed_kts_pilot'] = 0
-                            # else:
-                            #     logger.warning(f"Missing data for keys: {missing_keys}; skipping message.")
-                            #     continue
+                        # Fill missing last known values with safe defaults
+                        defaults = {
+                            'latitude': 0.0,
+                            'longitude': 0.0,
+                            'elevation': 0.0,
+                            'mag_psi': 0.0,
+                            'magnetic_variation': 0.0,
+                            'airspeed_kts_pilot': 0.0,
+                            'paused': 0
+                        }
+
+                        for key in defaults:
+                            if key not in last_known_values:
+                                logger.warning(f"Missing {key}, applying default {defaults[key]}")
+                                last_known_values[key] = defaults[key]
 
                         # Retrieve the latest data for processing
                         latitude = last_known_values['latitude']
