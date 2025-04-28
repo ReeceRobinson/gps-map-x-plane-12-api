@@ -1,21 +1,49 @@
+"""
+garmin_gps_connector.py
+-----------------------
+Translate aircraft state streaming from the X-Plane Web API into Garmin
+“Aviation-In” ASCII sentences and push them to a serial port (or a mock port).
+
+Quick usage
+-----------
+$ python src/garmin_gps_connector.py          # live serial
+$ python src/garmin_gps_connector.py --test   # mock serial (console output)
+
+Configuration keys read from resources/config.yml
+-------------------------------------------------
+x-plane:
+  connection:
+    serial:
+      device   : /dev/ttyUSB0
+      baud     : 9600
+      timeout  : 1
+    webapi:
+      message_rate  : 10     # emit every N update frames
+      pause_timeout : 1.5    # silence → synthetic pause
+      # Reconnect back-off doubles from 5 s to a max of 10 s
+"""
+
 import io
 import logging
 import os
+import sys
 import asyncio
-import json
-import websockets
-import math
-import click
 import serial
 import yaml
-import time
-from garmin_gps_webapi import GarminGpsWebAPI
+
+from garmin_gps_webapi import ErrorResult, FlightLoopUpdate, GarminGpsWebAPI, PauseState, Disconnected
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class MockSerial(io.RawIOBase):
+    """
+    Lightweight in-memory replacement for :class:`serial.Serial`.
+
+    Used when running the connector with the ``--test`` flag.
+    Ensures :class:`io.TextIOWrapper` sees the stream as writable.
+    """
     def __init__(self, *args, **kwargs):
         self.logger = logging.getLogger('MockSerial')
         self.logger.setLevel(logging.DEBUG)
@@ -47,14 +75,20 @@ class MockSerial(io.RawIOBase):
 
 class GarminGpsConnector:
     """
-    Garmin GPS Hardware connector for X-Plane and AviationIn format capture.
-    """
-    file_handler = logging.FileHandler('garmin_gps_connector.log')
-    formatter = logging.Formatter('%(asctime)s : %(levelname)s : %(name)s : %(message)s')
-    file_handler.setFormatter(formatter)
+    Bridge between X-Plane and a physical Garmin GPS.
 
-    # add handlers to logger
-    logger.addHandler(file_handler)
+    Responsibilities
+    ----------------
+    1. Connect to the X-Plane Web API via :class:`GarminGpsWebAPI`.
+    2. Consume high-rate *dataref_update_values* frames (and synthetic
+       pause/resume events) produced by :py:meth:`stream_updates`.
+    3. Convert the latest aircraft state to a Garmin “Aviation-In” sentence
+       via :py:meth:`build_sentence`.
+    4. Send sentences out the configured serial port (or :class:`MockSerial`
+       when the connector is launched with `--test`).
+    5. Auto-reconnect to the Web-API whenever the socket closes, using an
+       back-off that starts at 5 s and caps at 10 s.
+    """
 
     logger.info('Starting GarminGpsConnector')
 
@@ -63,14 +97,16 @@ class GarminGpsConnector:
         logging.debug('Configuration loaded: {0}'.format(str(self.config.values())))
 
         self.device = self.config['x-plane']['connection']['serial']['device']
-        device_ok = os.path.exists(self.device)
-        if not device_ok:
-            logging.error(
-                'Invalid device setting for x-plane/connection/serial/device. Value is currently {0}'.format(self.device))
-            raise FileNotFoundError(f'Device not found: {self.device}')
 
     @staticmethod
     def load_config():
+        """
+        Load *resources/config.yml* and return it as a nested dict.
+
+        Returns
+        -------
+        dict
+        """
         config = {}
         with open(r'resources/config.yml') as file:
             # The FullLoader parameter handles the conversion from YAML
@@ -79,22 +115,28 @@ class GarminGpsConnector:
         return config
 
     @staticmethod
-    def decdeg2ddm(dd):
+    def convert_decdeg_to_ddm(dd):
+        """
+        Convert decimal degrees to degrees-and-decimal-minutes (DDM).
+
+        Returns
+        -------
+        tuple(int, float)
+            (degrees, minutes) where *minutes* is fractional.
+        """
         negative = dd < 0
         dd = abs(dd)
         degrees = int(dd)
         minutes = (dd - degrees) * 60
 
         if negative:
-            if degrees > 0:
-                degrees = -degrees
-            elif minutes > 0:
-                minutes = -minutes
+            degrees = -degrees
         return degrees, minutes
 
     @staticmethod
     def convert_lat(lat_raw):
-        result = GarminGpsConnector.decdeg2ddm(lat_raw)
+        """Format latitude for Aviation-In: (hemi, 2-deg, mm.mm*100)."""
+        result = GarminGpsConnector.convert_decdeg_to_ddm(lat_raw)
         hemi = 'N'
         if result[0] < 0:
             hemi = 'S'
@@ -102,11 +144,13 @@ class GarminGpsConnector:
 
         minutes = abs(result[1])
 
+        # Returns ('N', '36', '9872') for  −36.9872°  ->   'S 36 9872'
         return "{0}".format(hemi), "{0:02d}".format(deg), "{0:04d}".format(round(minutes * 100))
 
     @staticmethod
     def convert_lon(lon_raw):
-        result = GarminGpsConnector.decdeg2ddm(lon_raw)
+        """Format longitude for Aviation-In: (hemi, 2-deg, mm.mm*100)."""
+        result = GarminGpsConnector.convert_decdeg_to_ddm(lon_raw)
         hemi = 'E'
         if result[0] < 0:
             hemi = 'W'
@@ -114,6 +158,7 @@ class GarminGpsConnector:
 
         minutes = abs(result[1])
 
+        # Returns ('N', '36', '9872') for  −36.9872°  ->   'S 36 9872'
         return "{0}".format(hemi), "{0:02d}".format(deg), "{0:04d}".format(round(minutes * 100))
 
 
@@ -122,7 +167,27 @@ class GarminGpsConnector:
     # ------------------------------------------------------------------ #
     def build_sentence(self, latitude, longitude, elevation_m,
                        mag_psi, magnetic_variation_deg, knots):
-        """Return a formatted Aviation-In ASCII sentence."""
+        """
+        Convert aircraft state into a single Aviation-In sentence.
+
+        Parameters
+        ----------
+        latitude, longitude : float
+            Decimal degrees (negative south/west).
+        elevation_m : float
+            Elevation in metres above MSL.
+        mag_psi : float
+            Magnetic heading ψ, degrees (0-360).
+        magnetic_variation_deg : float
+            East positive, West negative.
+        knots : int
+            Airspeed in knots (0 while paused).
+
+        Returns
+        -------
+        str
+            Complete sentence including STX/ETX and CR/LF line endings.
+        """
         altitude_ft = int(elevation_m * 3.28084)
         lat_h, lat_deg, lat_min = self.convert_lat(latitude)
         lon_h, lon_deg, lon_min = self.convert_lon(longitude)
@@ -161,7 +226,12 @@ class GarminGpsConnector:
     
     def run_webapi(self, test_mode=False):
         """
-        Run the GPS connector using the Web API.
+        Main entry-point: connect to Web API, stream events and write serial.
+
+        Parameters
+        ----------
+        test_mode : bool, optional
+            If True, use :class:`MockSerial` instead of a real serial port.
         """
         gps_webapi = GarminGpsWebAPI(self.config)
         message_rate = self.config['x-plane']['connection']['webapi'].get('message_rate', 10)
@@ -169,205 +239,101 @@ class GarminGpsConnector:
         last_known_values = {}
 
         async def main():
-            await gps_webapi.fetch_dataref_ids()
-            await gps_webapi.connect_websocket()
-
-            message_counter = 0
-            # Open serial connection
+            """
+            Keep the serial port open and (re)connect to X-Plane's Web-API
+            with exponential back-off (5 s → 10 s max) whenever the websocket drops.
+            """
+            # ----- Serial initialisation (once) ------------------------ #
             if test_mode:
                 ser = MockSerial()
             else:
+                if not os.path.exists(self.device):
+                    logger.error("Serial device not found: %s", self.device)
+                    raise FileNotFoundError(self.device)
                 ser = serial.Serial(
-                    self.config['x-plane']['connection']['serial']['device'],
+                    self.device,
                     self.config['x-plane']['connection']['serial']['baud'],
-                    timeout=self.config['x-plane']['connection']['serial']['timeout'])
-            sio = io.TextIOWrapper(io.BufferedWriter(ser), write_through=True, line_buffering=False, errors=None)
-            logger.info('GPS serial connection initialized.')
+                    timeout=self.config['x-plane']['connection']['serial']['timeout'],
+                )
+            sio = io.TextIOWrapper(io.BufferedWriter(ser), write_through=True)
+            logger.info("GPS serial connection initialised")
 
-            try:
-                # Timeout (seconds) with no Web‑API traffic before we assume the sim is paused
-                pause_timeout = self.config['x-plane']['connection']['webapi'].get('pause_timeout', 1.5)
-                last_packet_time = time.time()
+            # ----- Reconnect loop -------------------------------------- #
+            pause_timeout = self.config['x-plane']['connection']['webapi'].get('pause_timeout', 1.5)
+            backoff = 5     # seconds; doubles up to 10 s max on failure
+            message_counter = 0
 
-                while True:
-                    try:
-                        message = await asyncio.wait_for(gps_webapi.websocket.recv(), timeout=pause_timeout)
-                        last_packet_time = time.time()          # got traffic → refresh timer
-                    except asyncio.TimeoutError:
-                        logger.debug(
-                            f"FREEZE pkt lat={last_known_values.get('latitude')} "
-                            f"lon={last_known_values.get('longitude')}"
-                        )
-                        # No traffic for pause_timeout seconds → assume simulator paused
-                        first_silence = last_known_values.get('paused') != 1
-                        if first_silence:
-                            logger.debug(f"No data for {pause_timeout}s – assuming simulator paused.")
+            while True:
+                try:
+                    # 1) Establish / re-establish the websocket
+                    await gps_webapi.fetch_dataref_ids()
+                    await gps_webapi.connect_websocket()
+                    logger.info("Web-API connected")
+                    backoff = 5         # reset back-off after success
 
-                        # Mark paused and freeze airspeed
-                        last_known_values['paused'] = 1
-                        last_known_values['airspeed_kts_pilot'] = 0.0
+                    # 2) Stream events
+                    async for event in gps_webapi.stream_updates(pause_timeout):
+                        # --- Flight loop frames ------------------------- #
+                        if isinstance(event, FlightLoopUpdate):
+                            for key, id_ in gps_webapi.dataref_ids.items():
+                                if str(id_) in event.values:
+                                    last_known_values[key.split('/')[-1]] = event.values[str(id_)]
 
-                        # Re‑use existing builder to send a frozen packet *every* timeout
-                        # Only send if we already have a valid position
-                        if 'latitude' not in last_known_values or 'longitude' not in last_known_values:
-                            continue  # wait for first dataref update before freezing
-                        latitude  = last_known_values.get('latitude', 0.0)
-                        longitude = last_known_values.get('longitude', 0.0)
-                        elevation = last_known_values.get('elevation', 0.0)
-                        mag_psi   = last_known_values.get('mag_psi', 0.0)
-                        magnetic_variation = last_known_values.get('magnetic_variation', 0.0)
+                            message_counter += 1
+                            if message_counter % message_rate:
+                                continue
 
-                        frozen_msg = self.build_sentence(
-                            latitude, longitude, elevation,
-                            mag_psi, magnetic_variation,
-                            0   # knots frozen at 0
-                        )
-                        sio.write(frozen_msg)
-                        sio.flush()
-                        continue  # go back to waiting for traffic
+                            paused = int(last_known_values.get('paused', 0))
+                            knots = 0 if paused else int(round(last_known_values.get('airspeed_kts_pilot', 0) or 0))
 
-                    data = json.loads(message)
-                    logger.debug(f"RAW message_type={data.get('type')} payload={data}")
-                    message_type = data.get("type")
-                    if message_type == "dataref_update_values":
-                        values = data.get("data", {})
+                            sio.write(self.build_sentence(
+                                last_known_values.get('latitude', 0.0),
+                                last_known_values.get('longitude', 0.0),
+                                last_known_values.get('elevation', 0.0),
+                                last_known_values.get('mag_psi', 0.0),
+                                last_known_values.get('magnetic_variation', 0.0),
+                                knots
+                            ))
+                            sio.flush()
+                            continue
 
-                        # Extract values using dataref IDs
-                        data_fields = {
-                            'latitude': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/latitude"])),
-                            'longitude': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/longitude"])),
-                            'elevation': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/elevation"])),
-                            'mag_psi': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/mag_psi"])),
-                            'magnetic_variation': values.get(str(gps_webapi.dataref_ids["sim/flightmodel/position/magnetic_variation"]), 0.0),
-                            'airspeed_kts_pilot': values.get(str(gps_webapi.dataref_ids["sim/cockpit2/gauges/indicators/airspeed_kts_pilot"]),0),
-                            'paused': values.get(str(gps_webapi.dataref_ids["sim/time/paused"]), 0)
-                        }
+                        # --- Pause / Resume ------------------------------ #
+                        if isinstance(event, PauseState):
+                            last_known_values['paused'] = 1 if event.paused else 0
+                            if event.paused:
+                                last_known_values['airspeed_kts_pilot'] = 0.0
 
-                        # Update last known values with new data if available
-                        for key, value in data_fields.items():
-                            if value is not None:
-                                last_known_values[key] = value
+                            knots = 0 if event.paused else int(round(last_known_values.get('airspeed_kts_pilot', 0) or 0))
+                            sio.write(self.build_sentence(
+                                last_known_values.get('latitude', 0.0),
+                                last_known_values.get('longitude', 0.0),
+                                last_known_values.get('elevation', 0.0),
+                                last_known_values.get('mag_psi', 0.0),
+                                last_known_values.get('magnetic_variation', 0.0),
+                                knots
+                            ))
+                            sio.flush()
+                            continue
 
-                        # Rate‑limit outgoing GPS sentences, but always refresh the cache
-                        message_counter += 1
-                        if message_counter % message_rate != 0:
-                            continue  # cache updated, no packet this cycle
+                        # --- Web-API error frames ------------------------ #
+                        if isinstance(event, ErrorResult):
+                            logger.warning("Web-API error %s: %s", event.error_code, event.error_message)
 
-                        # Now that last_known_values is up to date, evaluate pause state
-                        paused = int(last_known_values.get('paused', 0))
-                        if paused:
-                            logger.debug("Simulator is paused; Freezing GPS position.")
-                        elif "paused" in last_known_values and last_known_values["paused"] == 0:
-                            logger.debug("Simulator un-paused; Resuming GPS position.")
+                        # --- Websocket dropped --------------------------- #
+                        if isinstance(event, Disconnected):
+                            raise ConnectionError(event.reason)
 
-                        # Fill missing last known values with safe defaults
-                        defaults = {
-                            'latitude': 0.0,
-                            'longitude': 0.0,
-                            'elevation': 0.0,
-                            'mag_psi': 0.0,
-                            'magnetic_variation': 0.0,
-                            'airspeed_kts_pilot': 0.0,
-                            'paused': 0
-                        }
-
-                        for key in defaults:
-                            if key not in last_known_values:
-                                logger.warning(f"Missing {key}, applying default {defaults[key]}")
-                                last_known_values[key] = defaults[key]
-
-                        # Retrieve the latest data for processing
-                        latitude = last_known_values['latitude']
-                        longitude = last_known_values['longitude']
-                        elevation = last_known_values['elevation']
-                        mag_psi = last_known_values['mag_psi']
-                        magnetic_variation = last_known_values['magnetic_variation']
-                        airspeed_kts_pilot = last_known_values['airspeed_kts_pilot']
-
-                        # Build Aviation‑In sentence
-                        if paused:
-                            knots = 0
-                        else:
-                            knots = int(round(airspeed_kts_pilot)) if airspeed_kts_pilot is not None and not math.isnan(airspeed_kts_pilot) else 0
-                        msg = self.build_sentence(
-                            latitude, longitude, elevation,
-                            mag_psi, magnetic_variation,
-                            knots
-                        )
-                        sio.write(msg)
-                        sio.flush()
-                        logger.debug('\n' + msg)
-
-                    elif message_type == "dataref_values":
-                        params = data.get("params", {})
-                        datarefs = params.get("datarefs") or params.get("values") or []
-
-                        # If the response is a simple mapping {id: value, ...} put it into list form
-                        if not datarefs and "data" in data and isinstance(data["data"], dict):
-                            datarefs = [{'id': int(k), 'value': v} for k, v in data["data"].items()]
-
-                        for entry in datarefs:
-                            logger.info(f"Dataref ID {entry['id']} = {entry['value']}")
-                            if entry['id'] == gps_webapi.dataref_ids["sim/time/paused"]:
-                                # --- Robust parse: accept int, bool, or str ("0"/"1"/"true"/"false") ---
-                                raw = entry['value']
-                                if isinstance(raw, bool):
-                                    new_paused = 1 if raw else 0
-                                elif isinstance(raw, (int, float)):
-                                    new_paused = int(raw)
-                                elif isinstance(raw, str):
-                                    new_paused = 1 if raw.strip().lower() in ("1", "true", "yes") else 0
-                                else:
-                                    logger.warning(f"Unexpected paused value type: {type(raw)}; treating as 0")
-                                    new_paused = 0
-
-                                prev_paused = int(last_known_values.get('paused', -1))
-                                last_known_values['paused'] = new_paused
-
-                                # Only act when the state toggles (0 ↔ 1)
-                                if new_paused != prev_paused:
-                                    # Freeze or restore airspeed
-                                    if new_paused == 1:            # just paused
-                                        last_known_values['airspeed_kts_pilot'] = 0.0
-                                    # else: keep the last live speed
-
-                                    # Re‑use existing builder to send a single packet
-                                    latitude  = last_known_values.get('latitude', 0.0)
-                                    longitude = last_known_values.get('longitude', 0.0)
-                                    elevation = last_known_values.get('elevation', 0.0)
-                                    mag_psi   = last_known_values.get('mag_psi', 0.0)
-                                    magnetic_variation = last_known_values.get('magnetic_variation', 0.0)
-                                    airspeed_kts_pilot = last_known_values.get('airspeed_kts_pilot', 0.0)
-                                    knots = 0 if new_paused == 1 else int(round(airspeed_kts_pilot))
-                                    msg = self.build_sentence(
-                                        latitude, longitude, elevation,
-                                        mag_psi, magnetic_variation,
-                                        knots
-                                    )
-                                    sio.write(msg)
-                                    sio.flush()
-                                    logger.debug('\n' + msg)
-
-            except websockets.exceptions.ConnectionClosed:
-                logger.warning("WebSocket connection closed.")
-            finally:
-                sio.close()
-                ser.close()
+                except (OSError, ConnectionError) as exc:
+                    # Could not connect or connection dropped: wait & retry
+                    logger.warning("%s - retrying in %s s", exc, backoff)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 10)
+                    continue
 
         asyncio.run(main())
 
-@click.group()
-@click.pass_context
-def cli(ctx):
-    """Garmin GPS Connector CLI."""
-    pass
-
-@cli.command()
-@click.option('--test', is_flag=True, help='Enable test mode with mocked serial port.')
-def run_webapi(test):
-    """Run the GPS connector using the Web API."""
-    connector = GarminGpsConnector()
-    connector.run_webapi(test_mode=test)
-
 if __name__ == "__main__":
-    cli()
+    # Run connector directly; pass --test to enable MockSerial
+    test_mode = "--test" in sys.argv
+    connector = GarminGpsConnector()
+    connector.run_webapi(test_mode=test_mode)

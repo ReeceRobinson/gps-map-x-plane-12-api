@@ -1,10 +1,58 @@
+"""
+garmin_gps_webapi.py
+--------------------
+Thin async client for the X-Plane 12 Web API focused on Garmin-GPS datarefs.
+
+Main features
+=============
+* Fetches the numeric IDs for a curated set of datarefs (see ``DATAREF_NAMES``)
+  so that subscription works across simulator sessions.
+* Opens a Web-socket connection, subscribes to those IDs, and provides:
+  - ``__aiter__``      → raw parsed events
+  - ``stream_updates`` → same, plus::
+
+        PauseState(paused=True)   # when traffic stops for *pause_timeout*
+        PauseState(paused=False)  # first frame after silence
+        Disconnected(reason=str)  # Web-socket dropped (sim closed)
+
+* Typed events are declared via :py:data:`dataclasses.dataclass` for ergonomic
+  ``match``/``isinstance`` handling.
+
+Typical usage
+-------------
+```python
+from garmin_gps_webapi import GarminGpsWebAPI, FlightLoopUpdate
+
+cfg = yaml.safe_load(open("resources/config.yml"))
+api = GarminGpsWebAPI(cfg)
+
+await api.fetch_dataref_ids()
+await api.connect_websocket()
+
+async for ev in api.stream_updates(pause_timeout=1.5):
+    if isinstance(ev, FlightLoopUpdate):
+        print(ev.values)
+```
+
+Configuration keys referenced
+-----------------------------
+```
+x-plane:
+  connection:
+    webapi:
+      url            : "http://localhost:8086/api/v2"
+```
+
+The connector module wraps this client and converts frames to Garmin
+“Aviation-n” serial sentences.
+"""
 import asyncio
 import json
 import logging
-import time
 import aiohttp
 import websockets
 import yaml
+from dataclasses import dataclass
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,18 +74,76 @@ DATAREF_NAMES = [
     "sim/time/paused"
 ]
 
+# ---------------------------------------------------------------------#
+# Typed events returned by the async iterator                          #
+# ---------------------------------------------------------------------#
+@dataclass
+class FlightLoopUpdate:
+    """High-rate update with many datarefs (type=dataref_update_values)."""
+    values: dict   # {dataref_id: value}
+
+@dataclass
+class ErrorResult:
+    """Error frame coming back from the Web API (type=result, success=False)."""
+    req_id: int
+    error_code: str
+    error_message: str
+
+@dataclass
+class ResultOK:
+    """Ack frame (type=result, success=True)."""
+    req_id: int
+
+@dataclass
+class PauseState:
+    """Synthetic event: emitted when traffic stops/resumes."""
+    paused: bool  # True = assumed paused, False = traffic resumed
+
+@dataclass
+class Disconnected:
+    """Emitted when the WebSocket drops (e.g. X-Plane quits)."""
+    reason: str
+
+@dataclass
+class MiscEvent:
+    """Any other JSON frame we don't specially handle."""
+    payload: dict
+
 class GarminGpsWebAPI:
+    """
+    Thin typed wrapper around the X-Plane 12 Web API focused on a handful of
+    Garmin-relevant datarefs.
+
+    Public workflow
+    ---------------
+    1. **`fetch_dataref_ids()`** - Look up the numeric IDs that X-Plane assigns
+       to each dataref name.  Must be called once per simulator session.
+    2. **`connect_websocket()`** - Open the Web-socket and subscribe to those
+       IDs so X-Plane starts pushing updates.
+    3. **`stream_updates()`** - Async generator that yields:
+         * :class:`FlightLoopUpdate`   - every *dataref_update_values* frame  
+         * :class:`PauseState`         - synthetic pause / resume signals  
+         * :class:`Disconnected`       - Web-socket unexpectedly closed  
+         * :class:`ErrorResult` / :class:`ResultOK` for *result* frames  
+       This is what the connector module consumes.
+    4. The class itself is an async iterator (``__aiter__``) if you only want
+       raw event frames without pause detection.
+
+    Notes
+    -----
+    * Pause detection uses a watchdog: if no frame arrives for
+      ``pause_timeout`` seconds, a *PauseState(paused=True)* is emitted.
+    * All events are small :py:data:`dataclasses.dataclass` instances, making
+      them friendly to ``match`` or ``isinstance`` dispatch.
+    * The reverse mapping ``id_to_name`` is populated so higher-level code can
+      translate the numeric IDs back to human-readable names if required.
+    """
     def __init__(self, config):
         self.config = config
         self.dataref_ids = {}
         self.websocket = None
         self.next_req_id = 1
         self.id_to_name = {}  # maps dataref ID to its name
-        self.last_dataref_values = {}
-        self.last_dataref_times = {}
-        self.value_threshold = 0.001
-        self.last_processed_time = 0
-        self.processing_interval = 1  # seconds (equivalent to 1Hz)
 
     async def fetch_dataref_ids(self):
         """
@@ -91,99 +197,91 @@ class GarminGpsWebAPI:
         await self.websocket.send(message)
         logger.info(f"Subscribed to {len(self.dataref_ids)} datarefs with req_id={req_id}")
 
-    async def receive_data(self):
+    # ------------------------------------------------------------------ #
+    # Allow:  async for msg in gps_webapi                                 #
+    # ------------------------------------------------------------------ #
+    async def __aiter__(self):
         """
-        Receive data from the WebSocket and process it.
+        Async iterator that yields each incoming Web-socket frame
+        parsed as JSON.  Call connect_websocket() first.
         """
-        try:
-            async for message in self.websocket:
-                current_time = time.time()
-                if current_time - self.last_processed_time < self.processing_interval:
-                    continue  # Skip processing to throttle the rate
-                self.last_processed_time = current_time
-            
-                data = json.loads(message)
-                message_type = data.get("type")
+        if self.websocket is None:
+            raise RuntimeError("WebSocket not connected; call connect_websocket() first.")
 
-                if message_type == "dataref_update_values":
-                    values = data.get("data", {})
+        while True:
+            raw = await self.websocket.recv()
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("Received non-JSON frame: %s", raw)
+                continue
 
-                    for dataref_id_str, value in values.items():
-                        dataref_id = int(dataref_id_str)
-                        name = self.id_to_name.get(dataref_id, f"Unknown ID {dataref_id}")
-
-                        last_value = self.last_dataref_values.get(dataref_id)
-                        value_changed = last_value is None or abs(value - last_value) > self.value_threshold
-
-                        if value_changed: #and time_passed:
-                            self.handle_dataref_update(name, value)
-                            self.last_dataref_values[dataref_id] = value
-
-                elif message_type == "dataref_values":
-                    params = data.get("params", {})
-                    datarefs = params.get("datarefs", [])
-                    for entry in datarefs:
-                        logger.info(f"Dataref ID {entry['id']} = {entry['value']}")
-                else:
-                    logger.debug(f"Unknown message type: {message_type}")
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("WebSocket connection closed.")
-
-    def handle_dataref_update(self, name: str, value: float):
-        """
-        Handle updated dataref values.
-        For now, just log them. Later, you can send to serial, file, etc.
-        """
-        logger.info(f"Update -> {name}: {value:.6f}")
+            yield self._parse_event(data)
 
     # ------------------------------------------------------------------ #
-    # Helper: build one Aviation‑In sentence                              #
+    # Translate a Web-socket JSON frame into a typed event               #
     # ------------------------------------------------------------------ #
-    def build_sentence(self, latitude, longitude, elevation_m,
-                       mag_psi, magnetic_variation_deg, knots):
+    @staticmethod
+    def _parse_event(data: dict):
+        msg_type = data.get("type")
+        if msg_type == "dataref_update_values":
+            return FlightLoopUpdate(values=data.get("data", {}))
+
+        if msg_type == "result":
+            if data.get("success", True):
+                return ResultOK(req_id=data.get("req_id"))
+            return ErrorResult(
+                req_id=data.get("req_id"),
+                error_code=data.get("error_code"),
+                error_message=data.get("error_message"),
+            )
+
+        # Fallback: wrap raw payload
+        return MiscEvent(payload=data)
+
+    # ------------------------------------------------------------------ #
+    # High-level stream that auto-detects pauses via watchdog            #
+    # ------------------------------------------------------------------ #
+    async def stream_updates(self, pause_timeout: float = 1.5):
         """
-        Format a complete Aviation‑In ASCII sentence.
+        Async generator that yields parsed events (like __aiter__) **plus**
+        PauseState(paused=True/False) when no traffic is seen for
+        `pause_timeout` seconds.
+
+        Usage:
+        >>> async for ev in api.stream_updates(1.5):
+        ...     ...
         """
-        altitude_ft = int(elevation_m * 3.28084)
+        if self.websocket is None:
+            raise RuntimeError("WebSocket not connected; call connect_websocket() first.")
 
-        lat_h, lat_deg, lat_min = self.convert_lat(latitude)
-        lon_h, lon_deg, lon_min = self.convert_lon(longitude)
+        paused = False
+        while True:
+            try:
+                try:
+                    raw = await asyncio.wait_for(self.websocket.recv(), timeout=pause_timeout)
+                except websockets.exceptions.ConnectionClosed as exc:
+                    logger.warning("WebSocket closed: %s", exc)
+                    yield Disconnected(reason=str(exc))
+                    break  # exit generator
+            except asyncio.TimeoutError:
+                if not paused:
+                    paused = True
+                    yield PauseState(paused=True)
+                continue  # go back to waiting for traffic
 
-        compass = int(round(mag_psi))
-        mag_var_tenths = int(round(magnetic_variation_deg * 10))
-        mag_prefix = "W" if mag_var_tenths >= 0 else "E"
+            # Got traffic → parse
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("Received non-JSON frame: %s", raw)
+                continue
 
-        return (
-            "z{alt:05d}\r\n"
-            "A{lat_h} {lat_deg} {lat_min}\r\n"
-            "B{lon_h} {lon_deg} {lon_min}\r\n"
-            "C{comp:03d}\r\n"
-            "D{spd:03d}\r\n"
-            "E00000\r\n"
-            "GR0000\r\n"
-            "I0000\r\n"
-            "KL0000\r\n"
-            "Q{mag_pref}{mag:03d}\r\n"
-            "S-----\r\n"
-            "T---------\r\n"
-            "w01@\r\n"
-        ).format(
-            alt=altitude_ft,
-            lat_h=lat_h, lat_deg=lat_deg, lat_min=lat_min,
-            lon_h=lon_h, lon_deg=lon_deg, lon_min=lon_min,
-            comp=compass,
-            spd=knots,
-            mag_pref=mag_prefix,
-            mag=abs(mag_var_tenths)
-        )
+            event = self._parse_event(data)
 
-    async def run(self):
-        await self.fetch_dataref_ids()
-        await self.connect_websocket()
-        await self.receive_data()
+            # If we were paused, emit resume
+            if paused:
+                paused = False
+                yield PauseState(paused=False)
 
-if __name__ == "__main__":
-
-    config = load_config()
-    gps_webapi = GarminGpsWebAPI(config)
-    asyncio.run(gps_webapi.run())
+            yield event
