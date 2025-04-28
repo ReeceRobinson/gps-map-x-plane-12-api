@@ -1,5 +1,7 @@
 # GPS‑Map × X‑Plane 12 API Connector
 
+![Cockpit overview](assets/GPSmap196.jpeg)
+
 A lightweight Python bridge that streams live flight data from **X‑Plane 12’s Web API** to a real **Garmin GPS‑map 196** (or any receiver that understands Garmin *Aviation‑In* sentences).
 
 Built by and for cockpit‑builders and sim‑enthusiasts.
