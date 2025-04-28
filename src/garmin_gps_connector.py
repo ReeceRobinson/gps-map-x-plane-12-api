@@ -1,4 +1,8 @@
 """
+© 2025 Reece Robinson - TRAC IT.  
+Licensed under CC BY-NC 4.0 (see LICENSE).
+Commercial use requires written permission.
+
 garmin_gps_connector.py
 -----------------------
 Translate aircraft state streaming from the X-Plane Web API into Garmin

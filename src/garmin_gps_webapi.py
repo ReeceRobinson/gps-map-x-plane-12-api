@@ -1,4 +1,8 @@
 """
+© 2025 Reece Robinson - TRAC IT.  
+Licensed under CC BY-NC 4.0 (see LICENSE).
+Commercial use requires written permission.
+
 garmin_gps_webapi.py
 --------------------
 Thin async client for the X-Plane 12 Web API focused on Garmin-GPS datarefs.
