@@ -46,7 +46,7 @@ class MockSerial(io.RawIOBase):
     """
     def __init__(self, *args, **kwargs):
         self.logger = logging.getLogger('MockSerial')
-        self.logger.setLevel(logging.DEBUG)
+        self.logger.setLevel(logging.INFO)
         handler = logging.StreamHandler()
         handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         self.logger.addHandler(handler)
