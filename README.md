@@ -1,6 +1,3 @@
-# GPS Map X-Plane 12 API
-
-This project provides a new integration for the GPS-map 196 Garmin flight GPS that leverages the new Web API provided in recent versions of X-Plane 12.
 # GPS‑Map × X‑Plane 12 API Connector
 
 A lightweight Python bridge that streams live flight data from **X‑Plane 12’s Web API** to a real **Garmin GPS‑map 196** (or any receiver that understands Garmin *Aviation‑In* sentences).
