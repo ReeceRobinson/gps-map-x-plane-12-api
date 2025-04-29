@@ -12,8 +12,8 @@ Built by and for cockpit‑builders and sim‑enthusiasts.
 
 ```
 X‑Plane 12  ─┬─> WebSocket (JSON frames) ──┐
-            │                             │
-            │   garmin_gps_webapi.py      ▼
+            │                              │
+            │   garmin_gps_webapi.py       ▼
             └─> Garmin‑ready events  ──> garmin_gps_connector.py
                                           │
                                           └─> Serial / USB‑TTL
@@ -49,7 +49,7 @@ X‑Plane 12  ─┬─> WebSocket (JSON frames) ──┐
   (Main deps: `websockets`, `pyserial`, `PyYAML`)
 * **X‑Plane 12** with Web API enabled  
   *Settings → Network → “Accept Incoming Connections”*  
-  Default endpoint is `ws://localhost:8086/ws`.
+  Default endpoint is `http://localhost:8086/api/v2`.
 
 ---
 
